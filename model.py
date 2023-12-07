@@ -50,26 +50,21 @@ def knn(x, k):
 
 
 def get_graph_feature(x, k=20):
-    # x = x.squeeze()
-    idx = knn(x, k=k)  # (batch_size, num_points, k)
+    # x = x.squeeze()[32, 3, 1024]
+    idx = knn(x, k=k)  # (batch_size, num_points, k) [32, 1024, 20]
     batch_size, num_points, _ = idx.size()
     device = torch.device('cuda')
-
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
-
-    idx = idx + idx_base
-
-    idx = idx.view(-1)
-
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points #[32, 1, 1]
+    idx = idx + idx_base#[32, 1024, 20]
+    idx = idx.view(-1) #
     _, num_dims, _ = x.size()
-
     x = x.transpose(2,
                     1).contiguous()  # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
-    feature = x.view(batch_size * num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims)
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
+    feature = x.view(batch_size * num_points, -1)[idx, :]# feature size: [32 * 1024 * 20, 3]
+    feature = feature.view(batch_size, num_points, k, num_dims) # feature : [32, 1024, 20, 3]
+    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1) #  x : [32, 1024, 20, 3]
 
-    feature = torch.cat((feature, x), dim=3).permute(0, 3, 1, 2)
+    feature = torch.cat((feature, x), dim=3).permute(0, 3, 1, 2) #  feature : [32, 6, 1024, 20]
 
     return feature
 
@@ -207,9 +202,9 @@ class MultiHeadedAttention(nn.Module):
     def __init__(self, h, d_model, dropout=0.1):
         "Take in model size and number of heads."
         super(MultiHeadedAttention, self).__init__()
-        assert d_model % h == 0
+        assert d_model % h == 0  # 确保 d_model 可以被 h 整除
         # We assume d_v always equals d_k
-        self.d_k = d_model // h
+        self.d_k = d_model // h  # 每个头的维度，这里是 512 // 4 = 128
         self.h = h
         self.linears = clones(nn.Linear(d_model, d_model), 4)
         self.attn = None
@@ -219,22 +214,24 @@ class MultiHeadedAttention(nn.Module):
         "Implements Figure 2"
         if mask is not None:
             # Same mask applied to all h heads.
-            mask = mask.unsqueeze(1)
-        nbatches = query.size(0)
+            mask = mask.unsqueeze(1) # 将 mask 扩展一维
+        nbatches = query.size(0) # 批量大小，这里是 32
 
         # 1) Do all the linear projections in batch from d_model => h x d_k
         query, key, value = \
             [l(x).view(nbatches, -1, self.h, self.d_k).transpose(1, 2).contiguous()
              for l, x in zip(self.linears, (query, key, value))]
+        # query, key, value 尺寸：[32, 4, 1024, 128]
 
         # 2) Apply attention on all the projected vectors in batch.
         x, self.attn = attention(query, key, value, mask=mask,
                                  dropout=self.dropout)
+        # attn 函数返回的 x 尺寸：[32, 4, 1024, 128]
 
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous() \
-            .view(nbatches, -1, self.h * self.d_k)
-        return self.linears[-1](x)
+            .view(nbatches, -1, self.h * self.d_k)  # 重塑后的 x 尺寸：[32, 1024, 512]
+        return self.linears[-1](x) # 最终输出尺寸：[32, 1024, 512]
 
 
 class PositionwiseFeedForward(nn.Module):
@@ -289,23 +286,24 @@ class DGCNN(nn.Module):
         self.bn5 = nn.BatchNorm2d(emb_dims)
 
     def forward(self, x):
+        # x [32, 1024, 3]
         batch_size, num_dims, num_points = x.size()
-        x = get_graph_feature(x)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x1 = x.max(dim=-1, keepdim=True)[0]
+        x = get_graph_feature(x) #[32, 6, 1024, 20]
+        x = F.relu(self.bn1(self.conv1(x)))# [32, 64, 1024, 20]
+        x1 = x.max(dim=-1, keepdim=True)[0] # [32, 64, 1024, 1]
 
-        x = F.relu(self.bn2(self.conv2(x)))
-        x2 = x.max(dim=-1, keepdim=True)[0]
+        x = F.relu(self.bn2(self.conv2(x))) # [32, 64, 1024, 20]
+        x2 = x.max(dim=-1, keepdim=True)[0] # [32, 64, 1024, 1]
 
-        x = F.relu(self.bn3(self.conv3(x)))
-        x3 = x.max(dim=-1, keepdim=True)[0]
+        x = F.relu(self.bn3(self.conv3(x))) # [32, 128, 1024, 20]
+        x3 = x.max(dim=-1, keepdim=True)[0] # [32, 128, 1024, 1]
 
-        x = F.relu(self.bn4(self.conv4(x)))
-        x4 = x.max(dim=-1, keepdim=True)[0]
+        x = F.relu(self.bn4(self.conv4(x))) #[32, 256, 1024, 20]
+        x4 = x.max(dim=-1, keepdim=True)[0] # [32, 256, 1024, 1]
 
-        x = torch.cat((x1, x2, x3, x4), dim=1)
+        x = torch.cat((x1, x2, x3, x4), dim=1) # [32, 512, 1024, 1]
 
-        x = F.relu(self.bn5(self.conv5(x))).view(batch_size, -1, num_points)
+        x = F.relu(self.bn5(self.conv5(x))).view(batch_size, -1, num_points) # [32, 512, 1024]
         return x
 
 
@@ -314,27 +312,27 @@ class MLPHead(nn.Module):
         super(MLPHead, self).__init__()
         emb_dims = args.emb_dims
         self.emb_dims = emb_dims
-        self.nn = nn.Sequential(nn.Linear(emb_dims * 2, emb_dims // 2),
+        self.nn = nn.Sequential(nn.Linear(emb_dims * 2, emb_dims // 2), #[32, 256]
                                 nn.BatchNorm1d(emb_dims // 2),
                                 nn.ReLU(),
-                                nn.Linear(emb_dims // 2, emb_dims // 4),
+                                nn.Linear(emb_dims // 2, emb_dims // 4),#[32, 128]
                                 nn.BatchNorm1d(emb_dims // 4),
                                 nn.ReLU(),
-                                nn.Linear(emb_dims // 4, emb_dims // 8),
+                                nn.Linear(emb_dims // 4, emb_dims // 8),#[32, 64]
                                 nn.BatchNorm1d(emb_dims // 8),
                                 nn.ReLU())
         self.proj_rot = nn.Linear(emb_dims // 8, 4)
         self.proj_trans = nn.Linear(emb_dims // 8, 3)
 
     def forward(self, *input):
-        src_embedding = input[0]
-        tgt_embedding = input[1]
-        embedding = torch.cat((src_embedding, tgt_embedding), dim=1)
-        embedding = self.nn(embedding.max(dim=-1)[0])
-        rotation = self.proj_rot(embedding)
-        rotation = rotation / torch.norm(rotation, p=2, dim=1, keepdim=True)
-        translation = self.proj_trans(embedding)
-        return quat2mat(rotation), translation
+        src_embedding = input[0] # [32, 512, 1024]
+        tgt_embedding = input[1] # [32, 512, 1024]
+        embedding = torch.cat((src_embedding, tgt_embedding), dim=1) # # [32, 1024, 1024]
+        embedding = self.nn(embedding.max(dim=-1)[0]) # 最大池化后输出尺寸: [32, 1024], 经过nn后输出尺寸: [32, 64]
+        rotation = self.proj_rot(embedding) #  [32, 4]
+        rotation = rotation / torch.norm(rotation, p=2, dim=1, keepdim=True) #  [32, 4]
+        translation = self.proj_trans(embedding) # 输出尺寸: [32, 3]
+        return quat2mat(rotation), translation # quat2mat将四元数转换为旋转矩阵，输出尺寸: [32, 3, 3] 和 [32, 3]
 
 
 class Identity(nn.Module):
@@ -363,12 +361,12 @@ class Transformer(nn.Module):
                                     nn.Sequential())
 
     def forward(self, *input):
-        src = input[0]
-        tgt = input[1]
-        src = src.transpose(2, 1).contiguous()
-        tgt = tgt.transpose(2, 1).contiguous()
-        tgt_embedding = self.model(src, tgt, None, None).transpose(2, 1).contiguous()
-        src_embedding = self.model(tgt, src, None, None).transpose(2, 1).contiguous()
+        src = input[0] # [32, 3, 1024]
+        tgt = input[1] # [32, 3, 1024]
+        src = src.transpose(2, 1).contiguous() # [32, 1024, 3]
+        tgt = tgt.transpose(2, 1).contiguous() # [32, 1024, 3]
+        tgt_embedding = self.model(src, tgt, None, None).transpose(2, 1).contiguous() # [32, 512, 1024]
+        src_embedding = self.model(tgt, src, None, None).transpose(2, 1).contiguous() # [32, 512, 1024]
         return src_embedding, tgt_embedding
 
 
@@ -452,21 +450,23 @@ class DCP(nn.Module):
             raise Exception('Not implemented')
 
     def forward(self, *input):
-        src = input[0]
-        tgt = input[1]
-        src_embedding = self.emb_nn(src)
-        tgt_embedding = self.emb_nn(tgt)
+        src = input[0] # 尺寸: [32, 3, 1024]
+        tgt = input[1] # 尺寸: [32, 3, 1024]
+        src_embedding = self.emb_nn(src) # 输出尺寸: [32, 512, 1024]
+        tgt_embedding = self.emb_nn(tgt) # 输出尺寸: [32, 512, 1024]
 
         src_embedding_p, tgt_embedding_p = self.pointer(src_embedding, tgt_embedding)
+        # 指针网络输出尺寸: [32, 512, 1024] (假设输出维度与输入一致)
 
-        src_embedding = src_embedding + src_embedding_p
-        tgt_embedding = tgt_embedding + tgt_embedding_p
+        src_embedding = src_embedding + src_embedding_p # [32, 512, 1024]
+        tgt_embedding = tgt_embedding + tgt_embedding_p # [32, 512, 1024]
 
+        # 使用头部网络计算旋转和平移  旋转矩阵尺寸: [32, 3, 3], 平移向量尺寸: [32, 3]
         rotation_ab, translation_ab = self.head(src_embedding, tgt_embedding, src, tgt)
         if self.cycle:
-            rotation_ba, translation_ba = self.head(tgt_embedding, src_embedding, tgt, src)
+            rotation_ba, translation_ba = self.head(tgt_embedding, src_embedding, tgt, src)# 旋转矩阵尺寸: [32, 3, 3], 平移向量尺寸: [32, 3]
 
         else:
-            rotation_ba = rotation_ab.transpose(2, 1).contiguous()
-            translation_ba = -torch.matmul(rotation_ba, translation_ab.unsqueeze(2)).squeeze(2)
+            rotation_ba = rotation_ab.transpose(2, 1).contiguous() #[32, 3, 3]
+            translation_ba = -torch.matmul(rotation_ba, translation_ab.unsqueeze(2)).squeeze(2) #[32, 3]
         return rotation_ab, translation_ab, rotation_ba, translation_ba
