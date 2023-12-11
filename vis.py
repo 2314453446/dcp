@@ -68,7 +68,7 @@ def main():
     for data in data_loader:
         src, target, _, _, _, _, _, _ = data
         src, target = src.cuda(), target.cuda()
-
+        print(src.shape)
         # 运行模型，匹配两个点云
         rotation_ab, translation_ab, _, _ = model(src, target)
 
